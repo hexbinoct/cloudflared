@@ -122,6 +122,59 @@ func TestGetMaxBackoffDuration(t *testing.T) {
 	}
 }
 
+func TestBackoffCeiling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const ceiling = 4 * time.Second
+	backoff := NewBackoffWithCeiling(10, time.Second, ceiling, true)
+	backoff.Clock = Clock{time.Now, immediateTimeAfter}
+
+	// Without a ceiling the maximum wait would double on every retry: 2s, 4s, 8s, 16s...
+	expected := []time.Duration{2 * time.Second, 4 * time.Second, ceiling, ceiling, ceiling}
+	for i, want := range expected {
+		duration, ok := backoff.GetMaxBackoffDuration(ctx)
+		if !ok {
+			t.Fatalf("retry %d: backoff refused despite retryForever", i)
+		}
+		if duration != want {
+			t.Fatalf("retry %d: backoff returned %v, expected %v", i, duration, want)
+		}
+		backoff.Backoff(ctx) // noop
+	}
+}
+
+// The grace period is what resets the retry counter after a connection has been stable.
+// If it grows unbounded alongside the backoff, an isolated disruption keeps inheriting the
+// maxed-out backoff of a previous, unrelated one.
+func TestGracePeriodCeiling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const ceiling = 4 * time.Second
+	backoff := NewBackoffWithCeiling(10, time.Second, ceiling, true)
+	backoff.Clock = Clock{time.Now, immediateTimeAfter}
+
+	for i := 0; i < 10; i++ {
+		backoff.Backoff(ctx) // noop
+	}
+	if gracePeriod := backoff.SetGracePeriod(); gracePeriod > ceiling {
+		t.Fatalf("grace period %v exceeded the ceiling %v", gracePeriod, ceiling)
+	}
+}
+
+func TestBackoffNoCeilingByDefault(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	backoff := NewBackoff(10, time.Second, true)
+	backoff.Clock = Clock{time.Now, immediateTimeAfter}
+
+	for i := 0; i < 5; i++ {
+		backoff.Backoff(ctx) // noop
+	}
+	if duration, ok := backoff.GetMaxBackoffDuration(ctx); !ok || duration != 64*time.Second {
+		t.Fatalf("backoff returned %v, expected the unclamped 64s on the sixth retry", duration)
+	}
+}
+
 func TestBackoffRetryForever(t *testing.T) {
 	t.Parallel()
 
