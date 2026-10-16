@@ -36,6 +36,9 @@ type BackoffHandler struct {
 	retryForever bool
 	// BaseTime sets the initial backoff period.
 	baseTime time.Duration
+	// ceiling caps both the computed backoff period and the grace period. A value of
+	// 0 means the durations grow unbounded with the number of retries.
+	ceiling time.Duration
 
 	retries       uint
 	resetDeadline time.Time
@@ -45,12 +48,32 @@ type BackoffHandler struct {
 }
 
 func NewBackoff(maxRetries uint, baseTime time.Duration, retryForever bool) BackoffHandler {
+	return NewBackoffWithCeiling(maxRetries, baseTime, 0, retryForever)
+}
+
+// NewBackoffWithCeiling is NewBackoff, but the exponentially growing backoff and grace
+// periods are clamped to ceiling. A ceiling of 0 disables clamping.
+//
+// A ceiling is what keeps a transient network failure from turning into a multi-minute
+// outage: without one, the backoff period doubles on every retry until it dwarfs the
+// disruption that caused it, and the grace period that resets the retry counter grows
+// alongside it, so the inflated period is inherited by the next, unrelated failure.
+func NewBackoffWithCeiling(maxRetries uint, baseTime, ceiling time.Duration, retryForever bool) BackoffHandler {
 	return BackoffHandler{
 		maxRetries:   maxRetries,
 		baseTime:     baseTime,
+		ceiling:      ceiling,
 		retryForever: retryForever,
 		Clock:        Clock{Now: time.Now, After: time.After},
 	}
+}
+
+// clamp limits d to the configured ceiling, if there is one.
+func (b BackoffHandler) clamp(d time.Duration) time.Duration {
+	if b.ceiling > 0 && d > b.ceiling {
+		return b.ceiling
+	}
+	return d
 }
 
 func (b BackoffHandler) GetMaxBackoffDuration(ctx context.Context) (time.Duration, bool) {
@@ -73,7 +96,7 @@ func (b BackoffHandler) GetMaxBackoffDuration(ctx context.Context) (time.Duratio
 		retries++
 	}
 
-	return exponentialBackoffDuration(b.GetBaseTime(), retries), true
+	return b.clamp(exponentialBackoffDuration(b.GetBaseTime(), retries)), true
 }
 
 // BackoffTimer returns a channel that sends the current time when the exponential backoff timeout expires.
@@ -115,7 +138,7 @@ func (b *BackoffHandler) SetGracePeriod() time.Duration {
 	if gracePeriodExponent < int64OverflowExponent {
 		gracePeriodExponent += gracePeriodExponentOffset
 	}
-	maxTimeToWait := exponentialBackoffDuration(b.GetBaseTime(), gracePeriodExponent)
+	maxTimeToWait := b.clamp(exponentialBackoffDuration(b.GetBaseTime(), gracePeriodExponent))
 	timeToWait := backoff.New(maxTimeToWait, maxTimeToWait).Duration()
 	b.resetDeadline = b.Clock.Now().Add(timeToWait)
 
@@ -146,8 +169,8 @@ func (b *BackoffHandler) ResetNow() {
 func (b *BackoffHandler) backoffStrategy() *backoff.Backoff {
 	if b.strategy == nil {
 		b.strategy = backoff.New(
-			exponentialBackoffDuration(b.GetBaseTime(), b.maxRetries),
-			exponentialBackoffDuration(b.GetBaseTime(), initialBackoffExponent),
+			b.clamp(exponentialBackoffDuration(b.GetBaseTime(), b.maxRetries)),
+			b.clamp(exponentialBackoffDuration(b.GetBaseTime(), initialBackoffExponent)),
 		)
 	}
 	return b.strategy

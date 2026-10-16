@@ -21,6 +21,16 @@ import (
 const (
 	// Waiting time before retrying a failed tunnel connection
 	tunnelRetryDuration = time.Second * 10
+	// Upper bound on the time the supervisor waits before retrying failed tunnel
+	// connections. tunnelRetryDuration is only the base of an exponential backoff, so
+	// without a ceiling the wait reaches 5m20s after five consecutive failures with the
+	// default --retries=5. That leaves a tunnel unreachable for minutes after
+	// connectivity has already come back, and because the grace period that resets the
+	// retry counter grows at the same rate, the next brief disruption inherits the
+	// maxed-out wait instead of starting over. Each connection already backs off
+	// individually (up to 32s) before reporting its error here, so this ceiling still
+	// leaves ample spacing between attempts.
+	maxTunnelRetryDuration = time.Minute
 	// Interval between registering new tunnels
 	registrationInterval = time.Second
 )
@@ -127,7 +137,7 @@ func (s *Supervisor) Run(
 	var tunnelsWaiting []int
 	tunnelsActive := s.config.HAConnections
 
-	backoff := retry.NewBackoff(s.config.Retries, tunnelRetryDuration, true)
+	backoff := newReconnectBackoff(s.config.Retries)
 	var backoffTimer <-chan time.Time
 
 	shuttingDown := false
@@ -154,6 +164,11 @@ func (s *Supervisor) Run(
 				s.waitForNextTunnel(tunnelError.index)
 
 				if backoffTimer == nil {
+					// This wait comes on top of the connection's own retry backoff, so log it;
+					// otherwise the tunnel appears stuck once that backoff has elapsed.
+					if duration, ok := backoff.GetMaxBackoffDuration(ctx); ok {
+						s.log.Logger().Info().Msgf("Restarting terminated connections in up to %s", duration)
+					}
 					backoffTimer = backoff.BackoffTimer()
 				}
 			} else if tunnelsActive == 0 {
@@ -179,6 +194,12 @@ func (s *Supervisor) Run(
 			shuttingDown = true
 		}
 	}
+}
+
+// newReconnectBackoff returns the backoff the supervisor waits out before restarting
+// terminated connections.
+func newReconnectBackoff(retries uint) retry.BackoffHandler {
+	return retry.NewBackoffWithCeiling(retries, tunnelRetryDuration, maxTunnelRetryDuration, true)
 }
 
 // Returns nil if initialization succeeded, else the initialization error.
