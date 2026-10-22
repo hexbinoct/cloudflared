@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 
 	"github.com/cloudflare/cloudflared/client"
 	"github.com/cloudflare/cloudflared/tracing"
@@ -39,6 +40,10 @@ func newTestHTTP2ClientConn(ctx context.Context, conn net.Conn) (*http.ClientCon
 }
 
 func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
+	return newTestHTTP2ConnectionWithPing(0, 0)
+}
+
+func newTestHTTP2ConnectionWithPing(pingInterval, pingTimeout time.Duration) (*HTTP2Connection, net.Conn) {
 	edgeConn, cfdConn := net.Pipe()
 	connIndex := uint8(0)
 	log := zerolog.Nop()
@@ -63,8 +68,59 @@ func newTestHTTP2Connection() (*HTTP2Connection, net.Conn) {
 		obs,
 		connIndex,
 		controlStream,
+		pingInterval,
+		pingTimeout,
 		&log,
 	), edgeConn
+}
+
+func TestHTTP2PingKeepsAnsweringEdgeConnected(t *testing.T) {
+	http2Conn, edgeConn := newTestHTTP2ConnectionWithPing(50*time.Millisecond, 200*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- http2Conn.Serve(ctx)
+	}()
+
+	// The test client answers pings like the edge does.
+	_, err := newTestHTTP2ClientConn(t.Context(), edgeConn)
+	require.NoError(t, err)
+
+	// Many ping intervals pass with no requests on the connection.
+	select {
+	case err := <-serveErr:
+		t.Fatalf("connection closed while the edge was answering pings: %v", err)
+	case <-time.After(time.Second):
+	}
+	assert.False(t, http2Conn.pingTimedOut.Load())
+	cancel()
+	<-serveErr
+}
+
+func TestHTTP2PingTimeoutClosesStalledConnection(t *testing.T) {
+	http2Conn, edgeConn := newTestHTTP2ConnectionWithPing(50*time.Millisecond, 100*time.Millisecond)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- http2Conn.Serve(t.Context())
+	}()
+
+	// An edge that completes the HTTP/2 handshake and then goes silent: it keeps
+	// reading, so cloudflared's writes do not block, but it never answers a ping.
+	go func() {
+		_, _ = io.Copy(io.Discard, edgeConn)
+	}()
+	_, err := edgeConn.Write([]byte(http2.ClientPreface))
+	require.NoError(t, err)
+	require.NoError(t, http2.NewFramer(edgeConn, nil).WriteSettings())
+
+	select {
+	case err := <-serveErr:
+		require.ErrorIs(t, err, errEdgePingTimeout)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled connection was not closed")
+	}
 }
 
 func TestHTTP2ConfigurationSet(t *testing.T) {

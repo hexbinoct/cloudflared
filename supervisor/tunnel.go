@@ -73,6 +73,10 @@ type TunnelConfig struct {
 	RPCTimeout         time.Duration
 	WriteStreamTimeout time.Duration
 
+	// HTTP2PingInterval and HTTP2PingTimeout control the PING health check on http2 edge connections.
+	HTTP2PingInterval time.Duration
+	HTTP2PingTimeout  time.Duration
+
 	DisableQUICPathMTUDiscovery         bool
 	QUICConnectionLevelFlowControlLimit uint64
 	QUICStreamLevelFlowControlLimit     uint64
@@ -556,6 +560,8 @@ func (e *EdgeTunnelServer) serveHTTP2(
 		e.config.Observer,
 		connIndex,
 		controlStreamHandler,
+		e.config.HTTP2PingInterval,
+		e.config.HTTP2PingTimeout,
 		e.config.Log,
 	)
 

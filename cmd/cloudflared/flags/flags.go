@@ -37,6 +37,12 @@ const (
 	// RpcTimeout is how long to wait for a Capnp RPC request to the edge
 	RpcTimeout = "rpc-timeout"
 
+	// HTTP2PingInterval is how long an http2 edge connection may go without receiving anything before cloudflared pings the edge
+	HTTP2PingInterval = "http2-ping-interval"
+
+	// HTTP2PingTimeout is how long cloudflared waits for the edge to answer that ping before it closes the connection
+	HTTP2PingTimeout = "http2-ping-timeout"
+
 	// WriteStreamTimeout sets if we should have a timeout when writing data to a stream towards the destination (edge/origin).
 	WriteStreamTimeout = "write-stream-timeout"
 
