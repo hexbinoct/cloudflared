@@ -134,6 +134,8 @@ var (
 		cfdflags.Retries,
 		"ha-connections",
 		"rpc-timeout",
+		cfdflags.HTTP2PingInterval,
+		cfdflags.HTTP2PingTimeout,
 		"write-stream-timeout",
 		"quic-disable-pmtu-discovery",
 		"quic-connection-level-flow-control-limit",
@@ -794,6 +796,18 @@ func tunnelFlags(shouldHide bool) []cli.Flag {
 		}),
 		altsrc.NewDurationFlag(&cli.DurationFlag{
 			Name:   cfdflags.RpcTimeout,
+			Value:  5 * time.Second,
+			Hidden: true,
+		}),
+		altsrc.NewDurationFlag(&cli.DurationFlag{
+			Name:   cfdflags.HTTP2PingInterval,
+			Usage:  "Ping the edge after an http2 connection has received nothing for this long, so a silently dead connection is noticed. 0 disables the pings.",
+			Value:  5 * time.Second,
+			Hidden: true,
+		}),
+		altsrc.NewDurationFlag(&cli.DurationFlag{
+			Name:   cfdflags.HTTP2PingTimeout,
+			Usage:  "Close an http2 edge connection when the edge does not answer a ping within this long.",
 			Value:  5 * time.Second,
 			Hidden: true,
 		}),

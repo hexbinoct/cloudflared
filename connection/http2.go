@@ -11,6 +11,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -31,7 +33,10 @@ const (
 	ConfigurationUpdate       = "update-configuration"
 )
 
-var errEdgeConnectionClosed = fmt.Errorf("connection with edge closed")
+var (
+	errEdgeConnectionClosed = fmt.Errorf("connection with edge closed")
+	errEdgePingTimeout      = fmt.Errorf("connection with edge stalled: no answer to ping")
+)
 
 // HTTP2Connection represents a net.Conn that uses HTTP2 frames to proxy traffic from the edge to cloudflared on the
 // origin.
@@ -48,6 +53,7 @@ type HTTP2Connection struct {
 	controlStreamHandler ControlStreamHandler
 	stoppedGracefully    bool
 	controlStreamErr     error // result of running control stream handler
+	pingTimedOut         atomic.Bool
 }
 
 // NewHTTP2Connection returns a new instance of HTTP2Connection.
@@ -58,13 +64,12 @@ func NewHTTP2Connection(
 	observer *Observer,
 	connIndex uint8,
 	controlStreamHandler ControlStreamHandler,
+	pingInterval time.Duration,
+	pingTimeout time.Duration,
 	log *zerolog.Logger,
 ) *HTTP2Connection {
-	return &HTTP2Connection{
-		conn: conn,
-		server: &http2.Server{
-			MaxConcurrentStreams: MaxConcurrentStreams,
-		},
+	c := &HTTP2Connection{
+		conn:                 conn,
 		orchestrator:         orchestrator,
 		connOptions:          connOptions,
 		observer:             observer,
@@ -72,6 +77,22 @@ func NewHTTP2Connection(
 		controlStreamHandler: controlStreamHandler,
 		log:                  log,
 	}
+	// TCP alone can take a long time to notice that the path to the edge has died, and
+	// until it does the edge may keep sending requests into the dead connection. When
+	// nothing has arrived for pingInterval, the server pings the edge and closes the
+	// connection if no answer comes back within pingTimeout.
+	c.server = &http2.Server{
+		MaxConcurrentStreams: MaxConcurrentStreams,
+		ReadIdleTimeout:      pingInterval,
+		PingTimeout:          pingTimeout,
+		CountError: func(errType string) {
+			if errType == "conn_close_lost_ping" {
+				c.pingTimedOut.Store(true)
+				c.log.Warn().Uint8(LogFieldConnIndex, c.connIndex).Msgf("Edge did not answer a ping within %s, closing the connection", pingTimeout)
+			}
+		},
+	}
+	return c
 }
 
 // Serve serves an HTTP2 server that the edge can talk to.
@@ -90,6 +111,9 @@ func (c *HTTP2Connection) Serve(ctx context.Context) error {
 		return nil
 	case c.controlStreamErr != nil:
 		return c.controlStreamErr
+	case c.pingTimedOut.Load():
+		c.observer.log.Info().Uint8(LogFieldConnIndex, c.connIndex).Msg("Lost connection with the edge")
+		return errEdgePingTimeout
 	default:
 		c.observer.log.Info().Uint8(LogFieldConnIndex, c.connIndex).Msg("Lost connection with the edge")
 		return errEdgeConnectionClosed

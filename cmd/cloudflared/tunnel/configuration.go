@@ -249,6 +249,8 @@ func prepareTunnelConfig(
 		EdgeTLSConfigs:                      edgeTLSConfigs,
 		MaxEdgeAddrRetries:                  uint8(c.Int(flags.MaxEdgeAddrRetries)), // nolint: gosec
 		RPCTimeout:                          c.Duration(flags.RpcTimeout),
+		HTTP2PingInterval:                   c.Duration(flags.HTTP2PingInterval),
+		HTTP2PingTimeout:                    c.Duration(flags.HTTP2PingTimeout),
 		WriteStreamTimeout:                  c.Duration(flags.WriteStreamTimeout),
 		DisableQUICPathMTUDiscovery:         c.Bool(flags.QuicDisablePathMTUDiscovery),
 		QUICConnectionLevelFlowControlLimit: c.Uint64(flags.QuicConnLevelFlowControlLimit),
